@@ -197,26 +197,26 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     return super.addZombie(server, e);
   }
 
-  private Callable<RequestTaskState> createRequestTask(final HttpSolrClient server, final Req req, final boolean zombieAttempt) {
+  private Callable<RequestTaskState> createRequestTask(final HttpSolrClient client, final Req req, final boolean zombieAttempt) {
 
     Callable<RequestTaskState> task = new Callable<RequestTaskState>() {
       public RequestTaskState call() throws Exception {
         Rsp rsp = new Rsp();
-        rsp.server = server.getBaseURL();
+        rsp.server = client.getBaseURL();
         RequestTaskState taskState = new RequestTaskState();
         taskState.response = rsp;
 
         try {
-          rsp.rsp = server.request(req.getRequest());
+          rsp.rsp = client.request(req.getRequest());
           taskState.stateDescription = TaskState.ResponseReceived;
           if (zombieAttempt) {
-            zombieServers.remove(server);
+            zombieServers.remove(client);
           }
         } catch (SolrException e) {
           // we retry on 404 or 403 or 503 - you can see this on solr shutdown
           if (e.code() == 404 || e.code() == 403 || e.code() == 503 || e.code() == 500) {
             if (!zombieAttempt) {
-              addZombie(server, e);
+              addZombie(client, e);
             }
             taskState.setException(e, TaskState.ServerException);
           } else {
@@ -225,19 +225,19 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
           }
         } catch (SocketException e) {
           if (!zombieAttempt) {
-            addZombie(server, e);
+            addZombie(client, e);
           }
           taskState.setException(e, TaskState.ServerException);
         } catch (SocketTimeoutException e) {
           if (!zombieAttempt) {
-            addZombie(server, e);
+            addZombie(client, e);
           }
           taskState.setException(e, TaskState.ServerException);
         } catch (SolrServerException e) {
           Throwable rootCause = e.getRootCause();
           if (rootCause instanceof IOException) {
             if (!zombieAttempt) {
-              addZombie(server, e);
+              addZombie(client, e);
             }
             taskState.setException(e, TaskState.ServerException);
           } else {
