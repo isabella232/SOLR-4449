@@ -45,6 +45,7 @@ import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.SolrParams;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   private static Logger log = LoggerFactory.getLogger(BackupRequestLBHttpSolrClient.class);
@@ -235,6 +236,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
         taskState.response = rsp;
 
         try {
+          MDC.put("LBHttpSolrClient.url", client.getBaseURL());
           Exception ex = doRequest(client, req, rsp, isUpdate, isZombie, zombieKey);
           if (ex != null) {
             taskState.setException(ex, TaskState.ServerException);
@@ -243,6 +245,8 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
           }
         } catch (Exception e) {
           taskState.setException(e, TaskState.RequestException);
+        } finally {
+          MDC.remove("LBHttpSolrClient.url");
         }
 
         return taskState;
