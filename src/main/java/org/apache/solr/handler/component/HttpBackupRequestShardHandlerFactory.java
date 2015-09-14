@@ -32,9 +32,9 @@ public class HttpBackupRequestShardHandlerFactory extends
   private boolean tryDeadServers = true;
 
   // Configure the amount of time before a backup request is sent to the next server in the list in milliseconds
-  static final String BACKUP_REQUEST_DELAY = "backupRequestDelay";
+  public static final String BACKUP_REQUEST_DELAY = "backupRequestDelay";
   // Configure the maximum request in flight due to backup requests
-  static final String MAX_CONCURRENT_REQUESTS = "maximumConcurrentRequests";
+  public static final String MAX_CONCURRENT_REQUESTS = "maximumConcurrentRequests";
   static final String TRY_DEAD_SERVERS = "tryDeadServers";
 
   @Override

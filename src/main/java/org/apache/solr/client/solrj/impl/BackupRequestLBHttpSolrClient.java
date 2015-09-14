@@ -20,10 +20,7 @@ package org.apache.solr.client.solrj.impl;
 import java.io.CharArrayWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.net.ConnectException;
 import java.net.MalformedURLException;
-import java.net.SocketException;
-import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -43,14 +40,15 @@ import org.apache.solr.client.solrj.request.IsUpdateRequest;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.SolrParams;
+import org.apache.solr.handler.component.HttpBackupRequestShardHandlerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
 public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   private static Logger log = LoggerFactory.getLogger(BackupRequestLBHttpSolrClient.class);
-  private final int maximumConcurrentRequests;
-  private final int backUpRequestDelay;
+  private final int defaultMaximumConcurrentRequests;
+  private final int defaultBackUpRequestDelay;
   private final ThreadPoolExecutor threadPoolExecuter;
   private final boolean tryDeadServers;
   private enum TaskState {
@@ -69,12 +67,12 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   }
 
   public BackupRequestLBHttpSolrClient(HttpClient httpClient,
-                                       ThreadPoolExecutor threadPoolExecuter, int maximumConcurrentRequests,
+                                       ThreadPoolExecutor threadPoolExecuter, int defaultMaximumConcurrentRequests,
                                        int backUpRequestPause, boolean tryDeadServers) throws MalformedURLException {
     super(httpClient);
     this.threadPoolExecuter = threadPoolExecuter;
-    this.maximumConcurrentRequests = maximumConcurrentRequests;
-    this.backUpRequestDelay = backUpRequestPause;
+    this.defaultMaximumConcurrentRequests = defaultMaximumConcurrentRequests;
+    this.defaultBackUpRequestDelay = backUpRequestPause;
     this.tryDeadServers = tryDeadServers;
   }
 
@@ -84,10 +82,10 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
    * is moved to the dead pool for a certain period of time, or until a test
    * request on that server succeeds.
    *
-   * If a request takes longer than backUpRequestDelay the request will be sent
+   * If a request takes longer than defaultBackUpRequestDelay the request will be sent
    * to the next server in the list, this will continue until there is a
    * response, the server list is exhausted or the number of requests in flight
-   * equals maximumConcurrentRequests.
+   * equals defaultMaximumConcurrentRequests.
    *
    * Servers are queried in the exact order given (except servers currently in
    * the dead pool are skipped). If no live servers from the provided list
@@ -104,7 +102,20 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
    */
   @Override
   public Rsp request(Req req) throws SolrServerException, IOException {
-    ArrayBlockingQueue<Future<RequestTaskState>> queue = new ArrayBlockingQueue<Future<RequestTaskState>>(maximumConcurrentRequests+1);
+    SolrParams reqParams = req.getRequest().getParams();
+    int maximumConcurrentRequests = reqParams == null
+            ? defaultMaximumConcurrentRequests
+            : reqParams.getInt(HttpBackupRequestShardHandlerFactory.MAX_CONCURRENT_REQUESTS, defaultMaximumConcurrentRequests);
+    int backupDelay = reqParams == null
+            ? defaultBackUpRequestDelay
+            : reqParams.getInt(HttpBackupRequestShardHandlerFactory.BACKUP_REQUEST_DELAY, defaultBackUpRequestDelay);
+
+    // If we can't do anything useful, fall back to the stock solr code
+    if (maximumConcurrentRequests < 0 || backupDelay < 0) {
+      return super.request(req);
+    }
+
+    ArrayBlockingQueue<Future<RequestTaskState>> queue = new ArrayBlockingQueue<Future<RequestTaskState>>(maximumConcurrentRequests +1);
     ExecutorCompletionService<RequestTaskState> executer =
             new ExecutorCompletionService<RequestTaskState>(threadPoolExecuter, queue);
 
@@ -143,10 +154,10 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       Callable<RequestTaskState> task = createRequestTask(client, req, isUpdate, false, null);
       executer.submit(task);
       inFlight++;
-      returnedRsp = getResponseIfReady(executer, inFlight >= maximumConcurrentRequests);
+      returnedRsp = getResponseIfReady(executer, patience(inFlight, maximumConcurrentRequests, backupDelay));
       if (returnedRsp == null) {
         // null response signifies that the response took too long.
-          log.info("Server :{} did not respond before the backUpRequestDelay time of {} elapsed", client.baseUrl, backUpRequestDelay);
+          log.info("Server :{} did not respond before the backupRequestDelay time of {} elapsed", client.baseUrl, backupDelay);
         continue;
       }
       inFlight--;
@@ -170,9 +181,9 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
           Callable<RequestTaskState> task = createRequestTask(wrapper.client, req, isUpdate, true, wrapper.getKey());
           executer.submit(task);
           inFlight++;
-          returnedRsp = getResponseIfReady(executer, inFlight>= maximumConcurrentRequests);
+          returnedRsp = getResponseIfReady(executer, patience(inFlight, maximumConcurrentRequests, backupDelay));
           if (returnedRsp == null) {
-            log.info("Server :{} did not respond before the backUpRequestDelay time of {} elapsed", wrapper.getKey(), backUpRequestDelay);
+            log.info("Server :{} did not respond before the backupRequestDelay time of {} elapsed", wrapper.getKey(), backupDelay);
             continue;
           }
           inFlight--;
@@ -193,7 +204,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     // exhausted.
     if (returnedRsp == null || returnedRsp.stateDescription == TaskState.ServerException) {
       while (inFlight > 0) {
-        returnedRsp = getResponseIfReady(executer, true);
+        returnedRsp = getResponseIfReady(executer, -1);
         inFlight--;
         if (returnedRsp.stateDescription == TaskState.ResponseReceived) {
           return returnedRsp.response;
@@ -214,6 +225,14 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
               + zombieServers.keySet(), ex);
     }
   }
+
+  private int patience(int inFlight, int maxConcurrentRequests, int waitTime) {
+    if (inFlight >= maxConcurrentRequests) {
+      return -1;  // wait forever
+    }
+    return waitTime;
+  }
+
   @Override
   protected Exception addZombie(HttpSolrClient server, Exception e) {
     CharArrayWriter cw = new CharArrayWriter();
@@ -256,14 +275,14 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   }
 
   private RequestTaskState getResponseIfReady(ExecutorCompletionService<RequestTaskState> executer,
-      boolean waitUntilTaskComplete) throws SolrException {
+      int backupDelay) throws SolrException {
 
     Future<RequestTaskState> taskInProgress = null;
     try {
-      if (waitUntilTaskComplete) {
+      if (backupDelay < 0) {
         taskInProgress = executer.take();
       } else {
-        taskInProgress = executer.poll(backUpRequestDelay, TimeUnit.MILLISECONDS);
+        taskInProgress = executer.poll(backupDelay, TimeUnit.MILLISECONDS);
       }
       // could be null if poll time exceeded in which case return null.
       if ( taskInProgress != null && !taskInProgress.isCancelled()) {
