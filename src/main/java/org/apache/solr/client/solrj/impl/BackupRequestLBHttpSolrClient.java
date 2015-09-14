@@ -139,7 +139,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
         continue;
       }
       HttpSolrClient client = makeSolrClient(serverStr);
-      Callable<RequestTaskState> task = createRequestTask(client, req, isUpdate, false);
+      Callable<RequestTaskState> task = createRequestTask(client, req, isUpdate, false, null);
       executer.submit(task);
       inFlight++;
       returnedRsp = getResponseIfReady(executer, inFlight >= maximumConcurrentRequests);
@@ -166,7 +166,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
           if(isTimeExceeded(timeAllowedNano, timeOutTime)) {
             break;
           }
-          Callable<RequestTaskState> task = createRequestTask(wrapper.client, req, isUpdate, true);
+          Callable<RequestTaskState> task = createRequestTask(wrapper.client, req, isUpdate, true, wrapper.getKey());
           executer.submit(task);
           inFlight++;
           returnedRsp = getResponseIfReady(executer, inFlight>= maximumConcurrentRequests);
@@ -224,7 +224,8 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     return super.addZombie(server, e);
   }
 
-  private Callable<RequestTaskState> createRequestTask(final HttpSolrClient client, final Req req, final boolean isUpdate, final boolean isZombie) {
+  private Callable<RequestTaskState> createRequestTask(final HttpSolrClient client, final Req req, final boolean isUpdate,
+                                                       final boolean isZombie, final String zombieKey) {
 
     Callable<RequestTaskState> task = new Callable<RequestTaskState>() {
       public RequestTaskState call() throws Exception {
@@ -234,56 +235,16 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
         taskState.response = rsp;
 
         try {
-          rsp.rsp = client.request(req.getRequest());
-          taskState.stateDescription = TaskState.ResponseReceived;
-          if (isZombie) {
-            zombieServers.remove(client);
-          }
-        } catch (SolrException e) {
-          if (!isUpdate && RETRY_CODES.contains(e.code())) {
-            if (!isZombie) {
-              addZombie(client, e);
-            }
-            taskState.setException(e, TaskState.ServerException);
+          Exception ex = doRequest(client, req, rsp, isUpdate, isZombie, zombieKey);
+          if (ex != null) {
+            taskState.setException(ex, TaskState.ServerException);
           } else {
-            // Server is alive but the request was likely malformed or invalid
-            if (isZombie) {
-              zombieServers.remove(client);
-            }
-            taskState.setException(e, TaskState.RequestException);
-          }
-        } catch (SocketException e) {
-          if (!isUpdate || e instanceof ConnectException) {
-            if (!isZombie) {
-              addZombie(client, e);
-            }
-            taskState.setException(e, TaskState.ServerException);
-          } else {
-            taskState.setException(e, TaskState.RequestException);
-          }
-        } catch (SocketTimeoutException e) {
-          if (!isUpdate) {
-            if (!isZombie) {
-              addZombie(client, e);
-            }
-            taskState.setException(e, TaskState.ServerException);
-          }
-          else {
-            taskState.setException(e, TaskState.RequestException);
-          }
-        } catch (SolrServerException e) {
-          Throwable rootCause = e.getRootCause();
-          if (rootCause instanceof IOException) {
-            if (!isZombie) {
-              addZombie(client, e);
-            }
-            taskState.setException(e, TaskState.ServerException);
-          } else {
-            taskState.setException(e, TaskState.RequestException);
+            taskState.stateDescription = TaskState.ResponseReceived;
           }
         } catch (Exception e) {
           taskState.setException(e, TaskState.RequestException);
         }
+
         return taskState;
       }
     };
@@ -303,6 +264,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       // could be null if poll time exceeded in which case return null.
       if ( taskInProgress != null && !taskInProgress.isCancelled()) {
         RequestTaskState resp = taskInProgress.get();
+
         return resp;
       }
     } catch (InterruptedException e) {
@@ -314,14 +276,14 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   }
 
   /**
-   * Copied from base class (5.3) to workaround private access modifier
+   * The following was copied from base class (5.3) to work around private access modifiers
    */
-  private long getTimeAllowedInNanos(final SolrRequest req) {
+  protected long getTimeAllowedInNanos(final SolrRequest req) {
     SolrParams reqParams = req.getParams();
     return reqParams == null ? -1 :
             TimeUnit.NANOSECONDS.convert(reqParams.getInt(CommonParams.TIME_ALLOWED, -1), TimeUnit.MILLISECONDS);
   }
-  private boolean isTimeExceeded(long timeAllowedNano, long timeOutTime) {
+  protected boolean isTimeExceeded(long timeAllowedNano, long timeOutTime) {
     return timeAllowedNano > 0 && System.nanoTime() > timeOutTime;
   }
   protected static Set<Integer> RETRY_CODES = new HashSet<>(4);
