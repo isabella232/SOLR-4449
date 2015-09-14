@@ -159,7 +159,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     }
 
     // no response so try the zombie servers
-    if(tryDeadServers){
+    if(tryDeadServers && skipped != null){
       if (returnedRsp == null || returnedRsp.stateDescription == TaskState.ServerException) {
         // try the servers we previously skipped
         for (ServerWrapper wrapper : skipped) {
