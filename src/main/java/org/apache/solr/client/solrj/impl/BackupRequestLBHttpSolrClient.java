@@ -20,11 +20,14 @@ package org.apache.solr.client.solrj.impl;
 import java.io.CharArrayWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.net.ConnectException;
 import java.net.MalformedURLException;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -34,8 +37,12 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.http.client.HttpClient;
+import org.apache.solr.client.solrj.SolrRequest;
 import org.apache.solr.client.solrj.SolrServerException;
+import org.apache.solr.client.solrj.request.IsUpdateRequest;
 import org.apache.solr.common.SolrException;
+import org.apache.solr.common.params.CommonParams;
+import org.apache.solr.common.params.SolrParams;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -99,23 +106,40 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     ArrayBlockingQueue<Future<RequestTaskState>> queue = new ArrayBlockingQueue<Future<RequestTaskState>>(maximumConcurrentRequests+1);
     ExecutorCompletionService<RequestTaskState> executer =
             new ExecutorCompletionService<RequestTaskState>(threadPoolExecuter, queue);
-    List<ServerWrapper> skipped = new ArrayList<ServerWrapper>(req.getNumDeadServersToTry());
+
+    final int numDeadServersToTry = req.getNumDeadServersToTry();
+    final boolean isUpdate = req.request instanceof IsUpdateRequest;
+    List<ServerWrapper> skipped = null;
     int inFlight = 0;
     RequestTaskState returnedRsp = null;
     Exception ex = null;
 
+    long timeAllowedNano = getTimeAllowedInNanos(req.getRequest());
+    long timeOutTime = System.nanoTime() + timeAllowedNano;
+
     for (String serverStr : req.getServers()) {
+      if(isTimeExceeded(timeAllowedNano, timeOutTime)) {
+        break;
+      }
+
       serverStr = normalize(serverStr);
       // if the server is currently a zombie, just skip to the next one
       ServerWrapper wrapper = zombieServers.get(serverStr);
       if (wrapper != null) {
-        if (tryDeadServers && skipped.size() < req.getNumDeadServersToTry()) {
-          skipped.add(wrapper);
+        if (tryDeadServers && numDeadServersToTry > 0) {
+          if (skipped == null) {
+            skipped = new ArrayList<>(numDeadServersToTry);
+            skipped.add(wrapper);
+          }
+          else if (skipped.size() < numDeadServersToTry) {
+            skipped.add(wrapper);
+          }
         }
+
         continue;
       }
       HttpSolrClient client = makeSolrClient(serverStr);
-      Callable<RequestTaskState> task = createRequestTask(client, req, false);
+      Callable<RequestTaskState> task = createRequestTask(client, req, isUpdate, false);
       executer.submit(task);
       inFlight++;
       returnedRsp = getResponseIfReady(executer, inFlight >= maximumConcurrentRequests);
@@ -139,7 +163,10 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       if (returnedRsp == null || returnedRsp.stateDescription == TaskState.ServerException) {
         // try the servers we previously skipped
         for (ServerWrapper wrapper : skipped) {
-          Callable<RequestTaskState> task = createRequestTask(wrapper.client, req, true);
+          if(isTimeExceeded(timeAllowedNano, timeOutTime)) {
+            break;
+          }
+          Callable<RequestTaskState> task = createRequestTask(wrapper.client, req, isUpdate, true);
           executer.submit(task);
           inFlight++;
           returnedRsp = getResponseIfReady(executer, inFlight>= maximumConcurrentRequests);
@@ -197,7 +224,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     return super.addZombie(server, e);
   }
 
-  private Callable<RequestTaskState> createRequestTask(final HttpSolrClient client, final Req req, final boolean zombieAttempt) {
+  private Callable<RequestTaskState> createRequestTask(final HttpSolrClient client, final Req req, final boolean isUpdate, final boolean isZombie) {
 
     Callable<RequestTaskState> task = new Callable<RequestTaskState>() {
       public RequestTaskState call() throws Exception {
@@ -209,34 +236,45 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
         try {
           rsp.rsp = client.request(req.getRequest());
           taskState.stateDescription = TaskState.ResponseReceived;
-          if (zombieAttempt) {
+          if (isZombie) {
             zombieServers.remove(client);
           }
         } catch (SolrException e) {
-          // we retry on 404 or 403 or 503 - you can see this on solr shutdown
-          if (e.code() == 404 || e.code() == 403 || e.code() == 503 || e.code() == 500) {
-            if (!zombieAttempt) {
+          if (!isUpdate && RETRY_CODES.contains(e.code())) {
+            if (!isZombie) {
               addZombie(client, e);
             }
             taskState.setException(e, TaskState.ServerException);
           } else {
             // Server is alive but the request was likely malformed or invalid
+            if (isZombie) {
+              zombieServers.remove(client);
+            }
             taskState.setException(e, TaskState.RequestException);
           }
         } catch (SocketException e) {
-          if (!zombieAttempt) {
-            addZombie(client, e);
+          if (!isUpdate || e instanceof ConnectException) {
+            if (!isZombie) {
+              addZombie(client, e);
+            }
+            taskState.setException(e, TaskState.ServerException);
+          } else {
+            taskState.setException(e, TaskState.RequestException);
           }
-          taskState.setException(e, TaskState.ServerException);
         } catch (SocketTimeoutException e) {
-          if (!zombieAttempt) {
-            addZombie(client, e);
+          if (!isUpdate) {
+            if (!isZombie) {
+              addZombie(client, e);
+            }
+            taskState.setException(e, TaskState.ServerException);
           }
-          taskState.setException(e, TaskState.ServerException);
+          else {
+            taskState.setException(e, TaskState.RequestException);
+          }
         } catch (SolrServerException e) {
           Throwable rootCause = e.getRootCause();
           if (rootCause instanceof IOException) {
-            if (!zombieAttempt) {
+            if (!isZombie) {
               addZombie(client, e);
             }
             taskState.setException(e, TaskState.ServerException);
@@ -273,5 +311,25 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
     }
     return null;
+  }
+
+  /**
+   * Copied from base class (5.3) to workaround private access modifier
+   */
+  private long getTimeAllowedInNanos(final SolrRequest req) {
+    SolrParams reqParams = req.getParams();
+    return reqParams == null ? -1 :
+            TimeUnit.NANOSECONDS.convert(reqParams.getInt(CommonParams.TIME_ALLOWED, -1), TimeUnit.MILLISECONDS);
+  }
+  private boolean isTimeExceeded(long timeAllowedNano, long timeOutTime) {
+    return timeAllowedNano > 0 && System.nanoTime() > timeOutTime;
+  }
+  protected static Set<Integer> RETRY_CODES = new HashSet<>(4);
+
+  static {
+    RETRY_CODES.add(404);
+    RETRY_CODES.add(403);
+    RETRY_CODES.add(503);
+    RETRY_CODES.add(500);
   }
 }
