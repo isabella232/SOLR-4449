@@ -8,7 +8,8 @@ A stand-alone project to generate a jar that provides the functionality in the S
 Using
 =======
 
-Drop the jar from this project into your solr lib dir.
+Drop the jar from this project into "server/solr-webapp/webapp/WEB-INF/lib". Due to protected-access modifiers, 
+this jar must be loaded by the same classloader as LBHttpSolrClient.  
 
 Configure your solrconfig.xml with a requestHandler that uses a custom shardHandlerFactory, like:
 

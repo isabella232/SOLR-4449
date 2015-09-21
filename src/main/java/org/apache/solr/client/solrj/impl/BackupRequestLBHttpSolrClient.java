@@ -120,7 +120,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
             new ExecutorCompletionService<RequestTaskState>(threadPoolExecuter, queue);
 
     final int numDeadServersToTry = req.getNumDeadServersToTry();
-    final boolean isUpdate = req.request instanceof IsUpdateRequest;
+    final boolean isUpdate = req.getRequest() instanceof IsUpdateRequest;
     List<ServerWrapper> skipped = null;
     int inFlight = 0;
     RequestTaskState returnedRsp = null;
@@ -240,7 +240,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     e.printStackTrace(pw);
     pw.flush();
     String stack = cw.toString();
-    log.info("Server :{} did not respond correctly or timed out, the server is zombied. {}", server.baseUrl, e.toString() + stack);
+    log.info("Server :{} did not respond correctly or timed out, the server is zombied. {}", server.getBaseURL(), e.toString() + stack);
     return super.addZombie(server, e);
   }
 
