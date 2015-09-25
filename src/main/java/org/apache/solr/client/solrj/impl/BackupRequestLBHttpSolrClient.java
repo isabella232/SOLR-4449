@@ -21,10 +21,7 @@ import java.io.CharArrayWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.MalformedURLException;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -33,6 +30,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import com.codahale.metrics.*;
+import com.codahale.metrics.Timer;
 import org.apache.http.client.HttpClient;
 import org.apache.solr.client.solrj.SolrRequest;
 import org.apache.solr.client.solrj.SolrServerException;
@@ -51,10 +50,20 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   private final int defaultBackUpRequestDelay;
   private final ThreadPoolExecutor threadPoolExecuter;
   private final boolean tryDeadServers;
+  private final MetricRegistry registry;
+
+  public enum BackupPercentile {
+    NONE, P50, P75, P95, P98, P99, P999
+  }
+  private final BackupPercentile defaultBackupPercentile;
+
+  public static BackupPercentile getPercentile(String percentile) {
+    return BackupPercentile.valueOf(percentile.toLowerCase().trim());
+  }
+
   private enum TaskState {
     ResponseReceived, ServerException, RequestException
   }
-
   private class RequestTaskState {
     private Exception exception;
     private TaskState stateDescription;
@@ -67,13 +76,19 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   }
 
   public BackupRequestLBHttpSolrClient(HttpClient httpClient,
-                                       ThreadPoolExecutor threadPoolExecuter, int defaultMaximumConcurrentRequests,
-                                       int backUpRequestPause, boolean tryDeadServers) throws MalformedURLException {
+                                       ThreadPoolExecutor threadPoolExecuter,
+                                       int defaultMaximumConcurrentRequests,
+                                       int backUpRequestPause,
+                                       boolean tryDeadServers,
+                                       String registryName,
+                                       BackupPercentile defaultBackupPercentile) throws MalformedURLException {
     super(httpClient);
     this.threadPoolExecuter = threadPoolExecuter;
     this.defaultMaximumConcurrentRequests = defaultMaximumConcurrentRequests;
     this.defaultBackUpRequestDelay = backUpRequestPause;
     this.tryDeadServers = tryDeadServers;
+    this.registry = SharedMetricRegistries.getOrCreate(registryName);
+    this.defaultBackupPercentile = defaultBackupPercentile;
   }
 
   /**
@@ -106,12 +121,46 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     int maximumConcurrentRequests = reqParams == null
             ? defaultMaximumConcurrentRequests
             : reqParams.getInt(HttpBackupRequestShardHandlerFactory.MAX_CONCURRENT_REQUESTS, defaultMaximumConcurrentRequests);
-    int backupDelay = reqParams == null
-            ? defaultBackUpRequestDelay
-            : reqParams.getInt(HttpBackupRequestShardHandlerFactory.BACKUP_REQUEST_DELAY, defaultBackUpRequestDelay);
 
     // If we can't do anything useful, fall back to the stock solr code
-    if (maximumConcurrentRequests < 0 || backupDelay < 0) {
+    if (maximumConcurrentRequests < 0) {
+      return super.request(req);
+    }
+
+    int backupDelay = reqParams == null
+            ? -1
+            : reqParams.getInt(HttpBackupRequestShardHandlerFactory.BACKUP_REQUEST_DELAY, -1);
+
+    BackupPercentile backupPercentile = defaultBackupPercentile;
+    String backupPercentileParam = reqParams == null
+            ? null
+            : reqParams.get(HttpBackupRequestShardHandlerFactory.BACKUP_REQUEST_DELAY);
+    if (backupPercentileParam != null) {
+      backupPercentile = getPercentile(backupPercentileParam);
+    }
+
+    String performanceClass = reqParams == null
+            ? req.getRequest().getPath()
+            : reqParams.get(HttpBackupRequestShardHandlerFactory.PERFORMANCE_CLASS, req.getRequest().getPath());    // getPath is typically the request handler name
+
+    if (backupDelay < 0 && backupPercentile != BackupPercentile.NONE) {
+      // no explicit backup delay, consider a backup percentile for the delay.
+      double rate = getRate(performanceClass);
+      if (rate > 0.5) {   // 30 requests per minute minimum.
+        backupDelay = (int)(getCachedPercentile(performanceClass, backupPercentile) / 1000000);  // nano to ms
+      }
+      else {
+        log.warn("Insufficient query rate ({} per sec) to rely on latency percentiles for performanceClass {}", rate, performanceClass);
+      }
+    }
+
+    if (backupDelay < 0) {
+      backupDelay = defaultBackUpRequestDelay;
+    }
+
+    // If we are using a backupPercentile, we need proceed regardless of backupDelay so we can record the percentile info.
+    // If not, and we still don't have a backupDelay, fall back to stock solr code.
+    if (backupPercentile == BackupPercentile.NONE && backupDelay < 0) {
       return super.request(req);
     }
 
@@ -151,9 +200,10 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
         continue;
       }
       HttpSolrClient client = makeSolrClient(serverStr);
-      Callable<RequestTaskState> task = createRequestTask(client, req, isUpdate, false, null);
+      Callable<RequestTaskState> task = createRequestTask(client, req, isUpdate, false, null, performanceClass);
       executer.submit(task);
       inFlight++;
+
       returnedRsp = getResponseIfReady(executer, patience(inFlight, maximumConcurrentRequests, backupDelay));
       if (returnedRsp == null) {
         // null response signifies that the response took too long.
@@ -178,7 +228,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
           if(isTimeExceeded(timeAllowedNano, timeOutTime)) {
             break;
           }
-          Callable<RequestTaskState> task = createRequestTask(wrapper.client, req, isUpdate, true, wrapper.getKey());
+          Callable<RequestTaskState> task = createRequestTask(wrapper.client, req, isUpdate, true, wrapper.getKey(), performanceClass);
           executer.submit(task);
           inFlight++;
           returnedRsp = getResponseIfReady(executer, patience(inFlight, maximumConcurrentRequests, backupDelay));
@@ -245,7 +295,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   }
 
   private Callable<RequestTaskState> createRequestTask(final HttpSolrClient client, final Req req, final boolean isUpdate,
-                                                       final boolean isZombie, final String zombieKey) {
+                                                       final boolean isZombie, final String zombieKey, final String performanceClass) {
 
     Callable<RequestTaskState> task = new Callable<RequestTaskState>() {
       public RequestTaskState call() throws Exception {
@@ -254,6 +304,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
         RequestTaskState taskState = new RequestTaskState();
         taskState.response = rsp;
 
+        final Timer.Context timerContext = getTimer(performanceClass).time();
         try {
           MDC.put("LBHttpSolrClient.url", client.getBaseURL());
           Exception ex = doRequest(client, req, rsp, isUpdate, isZombie, zombieKey);
@@ -266,6 +317,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
           taskState.setException(e, TaskState.RequestException);
         } finally {
           MDC.remove("LBHttpSolrClient.url");
+          timerContext.stop();
         }
 
         return taskState;
@@ -298,6 +350,56 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     return null;
   }
 
+  public Timer getTimer(final String metricName) {
+    SortedMap<String,Timer> timers = registry.getTimers();
+    Timer timer = registry.timer(metricName);
+
+    return timer;
+  }
+  public double getRate(final String metricName) {
+    return getTimer(metricName).getOneMinuteRate();
+  }
+  public Double getCachedPercentile(final String metricName, final BackupPercentile percentile) {
+    if (percentile == BackupPercentile.NONE) {
+      return -1.0;
+    }
+
+    final String cachedGaugeName = metricName + "-cachedpercentile-" + percentile.name();
+    Gauge gauge = registry.getGauges().get(cachedGaugeName);
+    if (gauge == null) {
+      try {
+        registry.register(cachedGaugeName,
+                new CachedGauge<Double>(15, TimeUnit.SECONDS) {
+                  Timer t = getTimer(metricName);
+                  @Override
+                  protected Double loadValue() {
+                    double measurement = -1.0;
+                    Snapshot snapshot = t.getSnapshot();
+                    switch (percentile) {
+                      case P50: measurement = snapshot.getMedian(); break;
+                      case P75: measurement = snapshot.get75thPercentile(); break;
+                      case P95: measurement = snapshot.get95thPercentile(); break;
+                      case P98: measurement = snapshot.get98thPercentile(); break;
+                      case P99: measurement = snapshot.get99thPercentile(); break;
+                      case P999: measurement = snapshot.get999thPercentile(); break;
+                    }
+                    return measurement;
+                  }
+                });
+      }
+      catch (IllegalArgumentException e) {
+        // Got created already by another thread
+        gauge = registry.getGauges().get(cachedGaugeName);
+      }
+    }
+    if (gauge == null) {
+      log.error("Could not find or create gauge {}", cachedGaugeName);
+      return -1.0;
+    }
+    return (Double)gauge.getValue();
+  }
+
+
   /**
    * The following was copied from base class (5.3) to work around private access modifiers
    */
@@ -317,4 +419,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     RETRY_CODES.add(503);
     RETRY_CODES.add(500);
   }
+
+
+
 }
