@@ -30,7 +30,7 @@ public class HttpBackupRequestShardHandlerFactory extends
   private int maximumConcurrentRequests = 2;
   private int backupRequestDelay = 10 * 1000;
   private boolean tryDeadServers = true;
-  private String registryName;
+  private String registryName = "BackupRequestRegistry";
   private BackupRequestLBHttpSolrClient.BackupPercentile defaultPercentile = BackupRequestLBHttpSolrClient.BackupPercentile.NONE;
 
   // Configure the amount of time before a backup request is sent to the next server in the list in milliseconds
@@ -38,7 +38,7 @@ public class HttpBackupRequestShardHandlerFactory extends
   // Configure the maximum request in flight due to backup requests
   public static final String MAX_CONCURRENT_REQUESTS = "maximumConcurrentRequests";
   public static final String TRY_DEAD_SERVERS = "tryDeadServers";
-  public static final String REGISTRY_NAME = "BackupRequestRegistry";
+  public static final String REGISTRY_NAME = "backupRequestRegistry";
   public static final String BACKUP_PERCENTILE = "backupRequestPercentile";
   public static final String PERFORMANCE_CLASS = "performanceClass";
 
@@ -51,7 +51,9 @@ public class HttpBackupRequestShardHandlerFactory extends
     this.maximumConcurrentRequests = getParameter(args, MAX_CONCURRENT_REQUESTS, maximumConcurrentRequests, sb);
     this.tryDeadServers = getParameter(args, TRY_DEAD_SERVERS, tryDeadServers, sb);
     this.registryName = getParameter(args, REGISTRY_NAME, registryName, sb);
-    this.defaultPercentile = BackupRequestLBHttpSolrClient.getPercentile(getParameter(args, BACKUP_PERCENTILE, "NONE", sb));
+    this.defaultPercentile = BackupRequestLBHttpSolrClient.getPercentile(
+      getParameter(args, BACKUP_PERCENTILE, defaultPercentile.name(), sb)
+    );
     super.init(info);
   }
 
@@ -60,7 +62,7 @@ public class HttpBackupRequestShardHandlerFactory extends
     try {
       return new BackupRequestLBHttpSolrClient(
           httpClient, getThreadPoolExecutor(),
-          maximumConcurrentRequests, backupRequestDelay,tryDeadServers, registryName, defaultPercentile);
+          maximumConcurrentRequests, backupRequestDelay, tryDeadServers, registryName, defaultPercentile);
     } catch (MalformedURLException e) {
       // should be impossible since we're not passing any URLs here
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);

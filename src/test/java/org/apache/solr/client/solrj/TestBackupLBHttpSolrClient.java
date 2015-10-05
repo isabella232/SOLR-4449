@@ -121,7 +121,7 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
 
   public void testConcurrentRequestsHitAllServers() throws Exception {
     int concurrentRequests = 5;
-    lbSolrServer = new BackupRequestLBHttpSolrClient(httpClient, commExecutor, concurrentRequests, 0, true);
+    lbSolrServer = new BackupRequestLBHttpSolrClient(httpClient, commExecutor, concurrentRequests, 0, true, "TestRegistry", BackupRequestLBHttpSolrClient.BackupPercentile.NONE);
     List<String> serverList = new ArrayList<String>();
     for (int i = 0; i < concurrentRequests; i++) {
       SolrInstance si = new SolrInstance("solr/collection1" + i, 0);
@@ -158,7 +158,7 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
   public void testTimeoutExceededTurnsServerZombie() throws Exception {
 
     LBHttpSolrClient lbSolrClient = new BackupRequestLBHttpSolrClient(
-        httpClient, commExecutor, 3, 250, true);
+        httpClient, commExecutor, 3, 250, true, "TestRegistry", BackupRequestLBHttpSolrClient.BackupPercentile.NONE);
     List<String> serverList = new ArrayList<String>();
 
     SolrInstance slow = new SolrInstance("solr/slow", 0);
@@ -209,7 +209,7 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
   public void testTimeoutExceeded() throws Exception {
 
     LBHttpSolrClient lbSolrClient = new BackupRequestLBHttpSolrClient(
-        httpClient, commExecutor, 2, 0, false);
+        httpClient, commExecutor, 2, 0, false, "TestRegistry", BackupRequestLBHttpSolrClient.BackupPercentile.NONE);
     List<String> serverList = new ArrayList<String>();
 
     for (int i = 0; i < 2; i++) {
@@ -261,7 +261,7 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
   public void testBackupRequest() throws Exception {
 
     LBHttpSolrClient lbSolrClient = new BackupRequestLBHttpSolrClient(
-        httpClient, commExecutor, 2, 200, true);
+        httpClient, commExecutor, 2, 200, true, "TestRegistry", BackupRequestLBHttpSolrClient.BackupPercentile.NONE);
     List<String> serverList = new ArrayList<String>();
 
     SolrInstance slow = new SolrInstance("solr/collection10", 0);
@@ -306,7 +306,7 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
   public void testBackupRequestBothSlow() throws Exception {
 
     LBHttpSolrClient lbSolrClient = new BackupRequestLBHttpSolrClient(
-        httpClient, commExecutor, 2, 250, true);
+        httpClient, commExecutor, 2, 250, true, "TestRegistry", BackupRequestLBHttpSolrClient.BackupPercentile.NONE);
     List<String> serverList = new ArrayList<String>();
 
     SolrInstance slow = new SolrInstance("solr/collection10", 0);
@@ -352,7 +352,7 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
     }
 
     LBHttpSolrClient lbSolrClient = new BackupRequestLBHttpSolrClient(
-        httpClient, commExecutor, 1, 1, true);
+        httpClient, commExecutor, 1, 1, true, "TestRegistry", BackupRequestLBHttpSolrClient.BackupPercentile.NONE);
     lbSolrClient.setAliveCheckInterval(500);
 
     SolrQuery solrQuery = new SolrQuery("*:*");
@@ -405,7 +405,7 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
     solr.put("solr/collection", si);
 
     LBHttpSolrClient lbSolrClient = new BackupRequestLBHttpSolrClient(
-        httpClient, commExecutor, 1, 1, true);
+        httpClient, commExecutor, 1, 1, true, "TestRegistry", BackupRequestLBHttpSolrClient.BackupPercentile.NONE);
 
     SolrQuery solrQuery = new SolrQuery("not_a_field::*");
     QueryResponse resp = null;

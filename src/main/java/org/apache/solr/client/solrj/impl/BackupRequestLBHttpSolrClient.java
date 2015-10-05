@@ -58,7 +58,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   private final BackupPercentile defaultBackupPercentile;
 
   public static BackupPercentile getPercentile(String percentile) {
-    return BackupPercentile.valueOf(percentile.toLowerCase().trim());
+    return BackupPercentile.valueOf(percentile.toUpperCase().trim());
   }
 
   private enum TaskState {
@@ -118,6 +118,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   @Override
   public Rsp request(Req req) throws SolrServerException, IOException {
     SolrParams reqParams = req.getRequest().getParams();
+
     int maximumConcurrentRequests = reqParams == null
             ? defaultMaximumConcurrentRequests
             : reqParams.getInt(HttpBackupRequestShardHandlerFactory.MAX_CONCURRENT_REQUESTS, defaultMaximumConcurrentRequests);
@@ -127,6 +128,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       return super.request(req);
     }
 
+    // if there's an explicit backupDelay in the request, use that
     int backupDelay = reqParams == null
             ? -1
             : reqParams.getInt(HttpBackupRequestShardHandlerFactory.BACKUP_REQUEST_DELAY, -1);
@@ -134,23 +136,24 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     BackupPercentile backupPercentile = defaultBackupPercentile;
     String backupPercentileParam = reqParams == null
             ? null
-            : reqParams.get(HttpBackupRequestShardHandlerFactory.BACKUP_REQUEST_DELAY);
+            : reqParams.get(HttpBackupRequestShardHandlerFactory.BACKUP_PERCENTILE);
     if (backupPercentileParam != null) {
       backupPercentile = getPercentile(backupPercentileParam);
     }
 
     String performanceClass = reqParams == null
-            ? req.getRequest().getPath()
-            : reqParams.get(HttpBackupRequestShardHandlerFactory.PERFORMANCE_CLASS, req.getRequest().getPath());    // getPath is typically the request handler name
+            ? req.getRequest().getPath()  // getPath is typically the request handler name
+            : reqParams.get(HttpBackupRequestShardHandlerFactory.PERFORMANCE_CLASS, reqParams.get(CommonParams.QT, req.getRequest().getPath()));  // TODO: Is QT getting filtered out of the distrib requests?
 
     if (backupDelay < 0 && backupPercentile != BackupPercentile.NONE) {
       // no explicit backup delay, consider a backup percentile for the delay.
       double rate = getRate(performanceClass);
-      if (rate > 0.5) {   // 30 requests per minute minimum.
-        backupDelay = (int)(getCachedPercentile(performanceClass, backupPercentile) / 1000000);  // nano to ms
+      if (rate > 0.1) {   // 1 request per 10 seconds minimum.
+        backupDelay = getCachedPercentile(performanceClass, backupPercentile);
+        log.debug("Using delay of {}ms for percentile {} for performanceClass {}", backupDelay, backupPercentile.name(), performanceClass);
       }
       else {
-        log.warn("Insufficient query rate ({} per sec) to rely on latency percentiles for performanceClass {}", rate, performanceClass);
+        log.info("Insufficient query rate ({} per sec) to rely on latency percentiles for performanceClass {}", rate, performanceClass);
       }
     }
 
@@ -158,11 +161,14 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       backupDelay = defaultBackUpRequestDelay;
     }
 
-    // If we are using a backupPercentile, we need proceed regardless of backupDelay so we can record the percentile info.
+    // If we are using a backupPercentile, we need to proceed regardless of backupDelay so we can record and build the percentile info.
     // If not, and we still don't have a backupDelay, fall back to stock solr code.
     if (backupPercentile == BackupPercentile.NONE && backupDelay < 0) {
       return super.request(req);
     }
+
+    // Reaching this point with a backupDelay < 0 means backup requests are effectively disabled, but we're executing
+    // this codepath anyway. Presumably in order to build latency percentile data for future requests.
 
     ArrayBlockingQueue<Future<RequestTaskState>> queue = new ArrayBlockingQueue<Future<RequestTaskState>>(maximumConcurrentRequests +1);
     ExecutorCompletionService<RequestTaskState> executer =
@@ -207,7 +213,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       returnedRsp = getResponseIfReady(executer, patience(inFlight, maximumConcurrentRequests, backupDelay));
       if (returnedRsp == null) {
         // null response signifies that the response took too long.
-          log.info("Server :{} did not respond before the backupRequestDelay time of {} elapsed", client.baseUrl, backupDelay);
+          log.debug("Server :{} did not respond before the backupRequestDelay time of {} elapsed", client.baseUrl, backupDelay);
         continue;
       }
       inFlight--;
@@ -233,7 +239,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
           inFlight++;
           returnedRsp = getResponseIfReady(executer, patience(inFlight, maximumConcurrentRequests, backupDelay));
           if (returnedRsp == null) {
-            log.info("Server :{} did not respond before the backupRequestDelay time of {} elapsed", wrapper.getKey(), backupDelay);
+            log.debug("Server :{} did not respond before the backupRequestDelay time of {} elapsed", wrapper.getKey(), backupDelay);
             continue;
           }
           inFlight--;
@@ -351,20 +357,24 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   }
 
   public Timer getTimer(final String metricName) {
-    SortedMap<String,Timer> timers = registry.getTimers();
-    Timer timer = registry.timer(metricName);
-
-    return timer;
+    return registry.timer(metricName);
   }
   public double getRate(final String metricName) {
     return getTimer(metricName).getOneMinuteRate();
   }
-  public Double getCachedPercentile(final String metricName, final BackupPercentile percentile) {
+
+  /**
+   * @param metricName
+   * @param percentile
+   * @return -1 if we couldn't find a usable percentile, or the number of millis to wait to achieve this percentile
+   */
+  public int getCachedPercentile(final String metricName, final BackupPercentile percentile) {
     if (percentile == BackupPercentile.NONE) {
-      return -1.0;
+      return -1;
     }
 
     final String cachedGaugeName = metricName + "-cachedpercentile-" + percentile.name();
+    // no getOrCreate here, so watch for race conditions
     Gauge gauge = registry.getGauges().get(cachedGaugeName);
     if (gauge == null) {
       try {
@@ -388,15 +398,26 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
                 });
       }
       catch (IllegalArgumentException e) {
-        // Got created already by another thread
+        // Got created already by another thread maybe?
         gauge = registry.getGauges().get(cachedGaugeName);
       }
     }
     if (gauge == null) {
-      log.error("Could not find or create gauge {}", cachedGaugeName);
-      return -1.0;
+      // It's been created, but hasn't had a chance to register yet.
+      // Rather than wait around, just try again next time.
+      return -1;
     }
-    return (Double)gauge.getValue();
+
+    Double nanoPercentile = (Double)gauge.getValue();
+    if (nanoPercentile == null) {
+      // the gauge exists, but hasn't had a chance to tick yet.
+      return -1;
+    }
+    int msPercentile = (int)(nanoPercentile / 1000000);
+    if (msPercentile < 1)
+      return -1;
+    else
+      return msPercentile;
   }
 
 
