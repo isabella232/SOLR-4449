@@ -53,7 +53,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   private final MetricRegistry registry;
 
   public enum BackupPercentile {
-    NONE, P50, P75, P95, P98, P99, P999
+    NONE, P50, P75, P90, P95, P98, P99, P999
   }
   private final BackupPercentile defaultBackupPercentile;
 
@@ -373,27 +373,32 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       return -1;
     }
 
-    final String cachedGaugeName = metricName + "-cachedpercentile-" + percentile.name();
+    final String cachedGaugeName = cachedGaugeName(metricName, percentile);
     // no getOrCreate here, so watch for race conditions
     Gauge gauge = registry.getGauges().get(cachedGaugeName);
     if (gauge == null) {
       try {
         registry.register(cachedGaugeName,
-                new CachedGauge<Double>(15, TimeUnit.SECONDS) {
+                new CachedGauge<Integer>(15, TimeUnit.SECONDS) {
                   Timer t = getTimer(metricName);
                   @Override
-                  protected Double loadValue() {
-                    double measurement = -1.0;
+                  protected Integer loadValue() {
+                    double measurementNanos = -1.0;
                     Snapshot snapshot = t.getSnapshot();
                     switch (percentile) {
-                      case P50: measurement = snapshot.getMedian(); break;
-                      case P75: measurement = snapshot.get75thPercentile(); break;
-                      case P95: measurement = snapshot.get95thPercentile(); break;
-                      case P98: measurement = snapshot.get98thPercentile(); break;
-                      case P99: measurement = snapshot.get99thPercentile(); break;
-                      case P999: measurement = snapshot.get999thPercentile(); break;
+                      case P50: measurementNanos = snapshot.getMedian(); break;
+                      case P75: measurementNanos = snapshot.get75thPercentile(); break;
+                      case P90: measurementNanos = snapshot.getValue(0.90); break;
+                      case P95: measurementNanos = snapshot.get95thPercentile(); break;
+                      case P98: measurementNanos = snapshot.get98thPercentile(); break;
+                      case P99: measurementNanos = snapshot.get99thPercentile(); break;
+                      case P999: measurementNanos = snapshot.get999thPercentile(); break;
                     }
-                    return measurement;
+                    int measurementMs = (int)(measurementNanos / 1000000);
+                    if (measurementMs < 1)
+                      return -1;
+                    else
+                      return measurementMs;
                   }
                 });
       }
@@ -403,23 +408,23 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       }
     }
     if (gauge == null) {
-      // It's been created, but hasn't had a chance to register yet.
+      // It's been created, but hasn't registered yet.
       // Rather than wait around, just try again next time.
       return -1;
     }
 
-    Double nanoPercentile = (Double)gauge.getValue();
-    if (nanoPercentile == null) {
+    Integer msPercentile = (Integer)gauge.getValue();
+    if (msPercentile == null) {
       // the gauge exists, but hasn't had a chance to tick yet.
       return -1;
     }
-    int msPercentile = (int)(nanoPercentile / 1000000);
-    if (msPercentile < 1)
-      return -1;
-    else
-      return msPercentile;
+
+    return msPercentile;
   }
 
+  public static String cachedGaugeName(String metricName, BackupPercentile percentile) {
+    return metricName + "-cachedpercentile-" + percentile.name();
+  }
 
   /**
    * The following was copied from base class (5.3) to work around private access modifiers

@@ -19,14 +19,14 @@ package org.apache.solr.client.solrj;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Properties;
+import java.util.*;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import com.codahale.metrics.MetricRegistry;
+import com.codahale.metrics.SharedMetricRegistries;
+import com.codahale.metrics.Timer;
 import org.apache.commons.io.FileUtils;
 import org.apache.http.client.HttpClient;
 import org.apache.lucene.util.IOUtils;
@@ -302,6 +302,88 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
     assertEquals("solr/collection10", name);
 
   }
+
+  public void testBackupRequestPercentile() throws Exception {
+    String sharedRegistryName = "testBackupRequestPercentile";
+    MetricRegistry sharedRegistry = SharedMetricRegistries.getOrCreate(sharedRegistryName);
+
+    LBHttpSolrClient lbSolrClient = new BackupRequestLBHttpSolrClient(
+            httpClient, commExecutor, 2, -1, true, sharedRegistryName, BackupRequestLBHttpSolrClient.BackupPercentile.NONE);
+    List<String> serverList = new ArrayList<String>();
+
+    SolrInstance slow = new SolrInstance("solr/collection10", 0);
+    slow.setUp();
+    slow.startJetty(90);
+    serverList.add(slow.getUrl());
+    addDocs(slow);
+    solr.put("solr/collection10", slow);
+
+    SolrInstance fast = new SolrInstance("solr/collection11", 0);
+    fast.setUp();
+    fast.startJetty();
+    serverList.add(fast.getUrl());
+    addDocs(fast);
+    solr.put("solr/collection11", fast);
+
+    QueryRequest requestP50 = percentileRequest("P50");
+    QueryRequest requestP999 = percentileRequest("P999");
+
+    // initialize the percentile tracking by doing percentile-enabled requests
+    while (!sharedRegistry.getGauges().keySet().contains(BackupRequestLBHttpSolrClient.cachedGaugeName("testPerformanceClass", BackupRequestLBHttpSolrClient.BackupPercentile.P50))) {
+      submitRequest(lbSolrClient, serverList, requestP50);
+    }
+    while (!sharedRegistry.getGauges().keySet().contains(BackupRequestLBHttpSolrClient.cachedGaugeName("testPerformanceClass", BackupRequestLBHttpSolrClient.BackupPercentile.P999))) {
+      submitRequest(lbSolrClient, serverList, requestP999);
+    }
+
+    // establish some performance history - uniform distribution between 1 and 100 ms,
+    // (although possibly skewed somewhat by the initialization queries above)
+    // which puts the "slow" instance at the 90th percentile.
+    Timer timer = sharedRegistry.timer("testPerformanceClass");
+    Random randomGenerator = new Random();
+    for(int i = 0; i<500; i++) timer.update(randomGenerator.nextInt(100) + 1, TimeUnit.MILLISECONDS);
+
+    Thread.sleep(15000); // allow the percentile cache to get updated
+
+    long requestCountBeforeRequest;
+    QueryResponse resp = null;
+    String name = null;
+
+    System.out.println("Timers: " + sharedRegistry.getTimers().keySet().toString());
+    System.out.println("Median response time: " + timer.getSnapshot().getMedian() / 1000000);
+    System.out.println("Gauges: " + sharedRegistry.getGauges().keySet().toString());
+
+    // a request at the p50 should cause a backup request
+    requestCountBeforeRequest = slow.jetty.getDebugFilter().getTotalRequests();
+    resp = submitRequest(lbSolrClient, serverList, requestP50);
+    assertEquals(10, resp.getResults().getNumFound());
+    name = resp.getResults().get(0).getFieldValue("name").toString();
+    assertEquals("solr/collection11", name);
+    while(commExecutor.getActiveCount()>0) Thread.sleep(1); // wait for slow filter to stop sleeping.
+    assertEquals(slow.jetty.getDebugFilter().getTotalRequests()
+            - requestCountBeforeRequest, 1);
+
+    // a request at the p999 should NOT cause a backup request
+    requestCountBeforeRequest = slow.jetty.getDebugFilter().getTotalRequests();
+    resp = submitRequest(lbSolrClient, serverList, requestP999);
+    assertEquals(10, resp.getResults().getNumFound());
+    name = resp.getResults().get(0).getFieldValue("name").toString();
+    assertEquals("solr/collection10", name);
+    while(commExecutor.getActiveCount()>0) Thread.sleep(1); // wait for slow filter to stop sleeping.
+    assertEquals(slow.jetty.getDebugFilter().getTotalRequests()
+            - requestCountBeforeRequest, 1);
+  }
+
+  public QueryRequest percentileRequest(String percentile) {
+    SolrQuery solrQuery = new SolrQuery("*:*");
+    solrQuery.set("backupRequestPercentile",percentile);
+    solrQuery.set("performanceClass","testPerformanceClass");
+    QueryResponse resp = null;
+    QueryRequest request = new QueryRequest(solrQuery);
+    return request;
+  }
+
+
 
   public void testBackupRequestBothSlow() throws Exception {
 
