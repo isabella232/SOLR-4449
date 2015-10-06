@@ -28,7 +28,7 @@ import org.apache.solr.core.PluginInfo;
 public class HttpBackupRequestShardHandlerFactory extends
     HttpShardHandlerFactory {
   private int maximumConcurrentRequests = 2;
-  private int backupRequestDelay = 10 * 1000;
+  private int backupRequestDelay = -1;
   private boolean tryDeadServers = true;
   private String registryName = "BackupRequestRegistry";
   private BackupRequestLBHttpSolrClient.BackupPercentile defaultPercentile = BackupRequestLBHttpSolrClient.BackupPercentile.NONE;
