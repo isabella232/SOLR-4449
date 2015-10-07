@@ -94,6 +94,8 @@ LBHttpSolrClient due to private qualifiers has changed somewhat. There are also 
 * The ability to disable backup requests and bypass most of the custom code here
 * Performance-aware backup requests
 
+The git tag "5.3_port_complete" can be used if you don't want the metrics-core dependency, and only 
+need fixed backup delays. 
 
 Author
 ==========
