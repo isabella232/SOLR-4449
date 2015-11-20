@@ -147,7 +147,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
 
     if (backupDelay < 0 && backupPercentile != BackupPercentile.NONE) {
       // no explicit backup delay, consider a backup percentile for the delay.
-      double rate = getRate(performanceClass);
+      double rate = getCachedRate(performanceClass);
       if (rate > 0.1) {   // 1 request per 10 seconds minimum.
         backupDelay = getCachedPercentile(performanceClass, backupPercentile);
         log.debug("Using delay of {}ms for percentile {} for performanceClass {}", backupDelay, backupPercentile.name(), performanceClass);
@@ -372,15 +372,56 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     else
       return metricsPrefix + performanceClass;
   }
+
   public static String cachedGaugeName(String metricName, BackupPercentile percentile) {
     return prefixedMetric(metricName + "-cachedpercentile-" + percentile.name());
+  }
+  public static String cachedRateName(String metricName) {
+    return prefixedMetric(metricName + "-cachedrate");
   }
 
   public Timer getTimer(final String performanceClass) {
     return registry.timer(prefixedMetric(performanceClass));
   }
-  public double getRate(final String performanceClass) {
-    return getTimer(performanceClass).getOneMinuteRate();
+
+  /**
+   *
+   * @param performanceClass
+   * @return The 1-minute rate, or -1 if we don't have a viable rate yet
+   */
+  public double getCachedRate(final String performanceClass) {
+    final String cachedRateName = cachedRateName(performanceClass);
+    // no getOrCreate here, so watch for race conditions
+    Gauge gauge = registry.getGauges().get(cachedRateName);
+    if (gauge == null) {
+      try {
+        registry.register(cachedRateName, new CachedGauge<Double>(15, TimeUnit.SECONDS) {
+          Timer t = getTimer(performanceClass);
+          @Override
+          protected Double loadValue() {
+            return t.getOneMinuteRate();
+          }
+        });
+      }
+      catch (IllegalArgumentException e) {
+        // Got created already by another thread maybe?
+        gauge = registry.getGauges().get(cachedRateName);
+      }
+    }
+
+    if (gauge == null) {
+      // It's been created, but hasn't registered yet.
+      // Rather than wait around, just try again next time.
+      return -1;
+    }
+
+    Double rate = (Double)gauge.getValue();
+    if (rate == null) {
+      // the gauge exists, but hasn't had a chance to tick yet.
+      return -1;
+    }
+
+    return rate;
   }
 
   /**
