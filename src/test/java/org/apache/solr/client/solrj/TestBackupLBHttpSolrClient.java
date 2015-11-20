@@ -339,7 +339,7 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
     // establish some performance history - uniform distribution between 1 and 100 ms,
     // (although possibly skewed somewhat by the initialization queries above)
     // which puts the "slow" instance at the 90th percentile.
-    Timer timer = sharedRegistry.timer("testPerformanceClass");
+    Timer timer = sharedRegistry.timer(BackupRequestLBHttpSolrClient.prefixedMetric("testPerformanceClass"));
     Random randomGenerator = new Random();
     for(int i = 0; i<500; i++) timer.update(randomGenerator.nextInt(100) + 1, TimeUnit.MILLISECONDS);
 

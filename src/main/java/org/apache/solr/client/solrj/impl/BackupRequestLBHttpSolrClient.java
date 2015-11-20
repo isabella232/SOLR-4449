@@ -156,6 +156,10 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
         log.info("Insufficient query rate ({} per sec) to rely on latency percentiles for performanceClass {}", rate, performanceClass);
       }
     }
+    else {
+      // not using a percentile to track backupDelay
+      performanceClass = null;
+    }
 
     if (backupDelay < 0) {
       backupDelay = defaultBackUpRequestDelay;
@@ -310,7 +314,10 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
         RequestTaskState taskState = new RequestTaskState();
         taskState.response = rsp;
 
-        final Timer.Context timerContext = getTimer(performanceClass).time();
+        Timer.Context timerContext = null;
+        if (performanceClass != null)
+          timerContext = getTimer(performanceClass).time();
+
         try {
           MDC.put("LBHttpSolrClient.url", client.getBaseURL());
           Exception ex = doRequest(client, req, rsp, isUpdate, isZombie, zombieKey);
@@ -323,7 +330,8 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
           taskState.setException(e, TaskState.RequestException);
         } finally {
           MDC.remove("LBHttpSolrClient.url");
-          timerContext.stop();
+          if (timerContext != null)
+            timerContext.stop();
         }
 
         return taskState;
@@ -354,25 +362,37 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
     }
     return null;
+
   }
 
-  public Timer getTimer(final String metricName) {
-    return registry.timer(metricName);
+  private static final String metricsPrefix = "BackupRequestSolrClient.";
+  public static String prefixedMetric(String performanceClass) {
+    if (performanceClass.startsWith(metricsPrefix))
+      return performanceClass;
+    else
+      return metricsPrefix + performanceClass;
   }
-  public double getRate(final String metricName) {
-    return getTimer(metricName).getOneMinuteRate();
+  public static String cachedGaugeName(String metricName, BackupPercentile percentile) {
+    return prefixedMetric(metricName + "-cachedpercentile-" + percentile.name());
+  }
+
+  public Timer getTimer(final String performanceClass) {
+    return registry.timer(prefixedMetric(performanceClass));
+  }
+  public double getRate(final String performanceClass) {
+    return getTimer(performanceClass).getOneMinuteRate();
   }
 
   /**
-   * @param metricName
+   * @param performanceClass
    * @param percentile
    * @return -1 if we couldn't find a usable percentile, or the number of millis to wait to achieve this percentile
    */
-  public int getCachedPercentile(final String metricName, final BackupPercentile percentile) {
+  public int getCachedPercentile(final String performanceClass, final BackupPercentile percentile) {
     if (percentile == BackupPercentile.NONE) {
       return -1;
     }
-
+    final String metricName = prefixedMetric(performanceClass);
     final String cachedGaugeName = cachedGaugeName(metricName, percentile);
     // no getOrCreate here, so watch for race conditions
     Gauge gauge = registry.getGauges().get(cachedGaugeName);
@@ -422,9 +442,6 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     return msPercentile;
   }
 
-  public static String cachedGaugeName(String metricName, BackupPercentile percentile) {
-    return metricName + "-cachedpercentile-" + percentile.name();
-  }
 
   /**
    * The following was copied from base class (5.3) to work around private access modifiers
