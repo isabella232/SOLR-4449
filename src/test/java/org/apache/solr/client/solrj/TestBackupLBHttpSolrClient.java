@@ -349,9 +349,9 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
     QueryResponse resp = null;
     String name = null;
 
-    System.out.println("Timers: " + sharedRegistry.getTimers().keySet().toString());
-    System.out.println("Median response time: " + timer.getSnapshot().getMedian() / 1000000);
-    System.out.println("Gauges: " + sharedRegistry.getGauges().keySet().toString());
+//    System.out.println("Timers: " + sharedRegistry.getTimers().keySet().toString());
+//    System.out.println("Median response time: " + timer.getSnapshot().getMedian() / 1000000);
+//    System.out.println("Gauges: " + sharedRegistry.getGauges().keySet().toString());
 
     // a request at the p50 should cause a backup request
     requestCountBeforeRequest = slow.jetty.getDebugFilter().getTotalRequests();

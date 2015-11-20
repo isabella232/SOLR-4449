@@ -210,7 +210,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
         continue;
       }
       HttpSolrClient client = makeSolrClient(serverStr);
-      Callable<RequestTaskState> task = createRequestTask(client, req, isUpdate, false, null, performanceClass);
+      Callable<RequestTaskState> task = createRequestTask(client, req, isUpdate, false, null, performanceClass, inFlight > 0);
       executer.submit(task);
       inFlight++;
 
@@ -238,7 +238,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
           if(isTimeExceeded(timeAllowedNano, timeOutTime)) {
             break;
           }
-          Callable<RequestTaskState> task = createRequestTask(wrapper.client, req, isUpdate, true, wrapper.getKey(), performanceClass);
+          Callable<RequestTaskState> task = createRequestTask(wrapper.client, req, isUpdate, true, wrapper.getKey(), performanceClass, inFlight > 0);
           executer.submit(task);
           inFlight++;
           returnedRsp = getResponseIfReady(executer, patience(inFlight, maximumConcurrentRequests, backupDelay));
@@ -305,7 +305,8 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   }
 
   private Callable<RequestTaskState> createRequestTask(final HttpSolrClient client, final Req req, final boolean isUpdate,
-                                                       final boolean isZombie, final String zombieKey, final String performanceClass) {
+                                                       final boolean isZombie, final String zombieKey, final String performanceClass,
+                                                       final boolean isBackup) {
 
     Callable<RequestTaskState> task = new Callable<RequestTaskState>() {
       public RequestTaskState call() throws Exception {
@@ -315,8 +316,10 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
         taskState.response = rsp;
 
         Timer.Context timerContext = null;
-        if (performanceClass != null)
+        if (isBackup) markBackupRequest(performanceClass);
+        if (performanceClass != null) {
           timerContext = getTimer(performanceClass).time();
+        }
 
         try {
           MDC.put("LBHttpSolrClient.url", client.getBaseURL());
@@ -374,14 +377,25 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
   }
 
   public static String cachedGaugeName(String metricName, BackupPercentile percentile) {
-    return prefixedMetric(metricName + "-cachedpercentile-" + percentile.name());
+    return prefixedMetric("cachedpercentile." + metricName + "." + percentile.name());
   }
   public static String cachedRateName(String metricName) {
-    return prefixedMetric(metricName + "-cachedrate");
+    return prefixedMetric("cachedrate." + metricName);
+  }
+  public static String backupRequestRateName(String performanceClass) {
+    return prefixedMetric("backup-requests." + performanceClass);
   }
 
   public Timer getTimer(final String performanceClass) {
     return registry.timer(prefixedMetric(performanceClass));
+  }
+  public Meter getBackupRequestMeter(final String performanceClass) {
+    return registry.meter(backupRequestRateName(performanceClass));
+  }
+  public void markBackupRequest(final String performanceClass) {
+    if (performanceClass != null)
+      getBackupRequestMeter(performanceClass).mark();
+    getBackupRequestMeter("total").mark();
   }
 
   /**
@@ -434,7 +448,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       return -1;
     }
     final String metricName = prefixedMetric(performanceClass);
-    final String cachedGaugeName = cachedGaugeName(metricName, percentile);
+    final String cachedGaugeName = cachedGaugeName(performanceClass, percentile);
     // no getOrCreate here, so watch for race conditions
     Gauge gauge = registry.getGauges().get(cachedGaugeName);
     if (gauge == null) {
