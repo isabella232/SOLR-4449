@@ -368,34 +368,37 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
 
   }
 
-  private static final String metricsPrefix = "BackupRequestSolrClient.";
+  private static final String globalMetricsPrefix = "BackupRequestSolrClient.";
   public static String prefixedMetric(String performanceClass) {
-    if (performanceClass.startsWith(metricsPrefix))
+    if (performanceClass.startsWith(globalMetricsPrefix))
       return performanceClass;
     else
-      return metricsPrefix + performanceClass;
+      return globalMetricsPrefix + performanceClass;
   }
 
   public static String cachedGaugeName(String metricName, BackupPercentile percentile) {
-    return prefixedMetric("cachedpercentile." + metricName + "." + percentile.name());
+    return prefixedMetric("Cached.Percentile." + metricName + "." + percentile.name());
   }
   public static String cachedRateName(String metricName) {
-    return prefixedMetric("cachedrate." + metricName);
+    return prefixedMetric("Cached.Rate." + metricName);
   }
   public static String backupRequestRateName(String performanceClass) {
-    return prefixedMetric("backup-requests." + performanceClass);
+    return prefixedMetric("BackupRequests." + performanceClass);
+  }
+  public static String timerName(String metricName) {
+    return prefixedMetric("PerformanceClasses." + metricName);
   }
 
   public Timer getTimer(final String performanceClass) {
-    return registry.timer(prefixedMetric(performanceClass));
+    return registry.timer(timerName(performanceClass));
   }
   public Meter getBackupRequestMeter(final String performanceClass) {
     return registry.meter(backupRequestRateName(performanceClass));
   }
   public void markBackupRequest(final String performanceClass) {
     if (performanceClass != null)
-      getBackupRequestMeter(performanceClass).mark();
-    getBackupRequestMeter("total").mark();
+      getBackupRequestMeter("PerformanceClasses." + performanceClass).mark();
+    getBackupRequestMeter("Total.total").mark();
   }
 
   /**
@@ -447,7 +450,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
     if (percentile == BackupPercentile.NONE) {
       return -1;
     }
-    final String metricName = prefixedMetric(performanceClass);
+
     final String cachedGaugeName = cachedGaugeName(performanceClass, percentile);
     // no getOrCreate here, so watch for race conditions
     Gauge gauge = registry.getGauges().get(cachedGaugeName);
@@ -455,7 +458,7 @@ public class BackupRequestLBHttpSolrClient extends LBHttpSolrClient {
       try {
         registry.register(cachedGaugeName,
                 new CachedGauge<Integer>(15, TimeUnit.SECONDS) {
-                  Timer t = getTimer(metricName);
+                  Timer t = getTimer(performanceClass);
                   @Override
                   protected Integer loadValue() {
                     double measurementNanos = -1.0;

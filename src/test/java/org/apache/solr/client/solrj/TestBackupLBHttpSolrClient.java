@@ -305,6 +305,7 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
 
   public void testBackupRequestPercentile() throws Exception {
     String sharedRegistryName = "testBackupRequestPercentile";
+    String performanceClass = "testPerformanceClass";
     MetricRegistry sharedRegistry = SharedMetricRegistries.getOrCreate(sharedRegistryName);
 
     LBHttpSolrClient lbSolrClient = new BackupRequestLBHttpSolrClient(
@@ -325,21 +326,21 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
     addDocs(fast);
     solr.put("solr/collection11", fast);
 
-    QueryRequest requestP50 = percentileRequest("P50");
-    QueryRequest requestP999 = percentileRequest("P999");
+    QueryRequest requestP50 = percentileRequest("P50", performanceClass);
+    QueryRequest requestP999 = percentileRequest("P999", performanceClass);
 
     // initialize the percentile tracking by doing percentile-enabled requests
-    while (!sharedRegistry.getGauges().keySet().contains(BackupRequestLBHttpSolrClient.cachedGaugeName("testPerformanceClass", BackupRequestLBHttpSolrClient.BackupPercentile.P50))) {
+    while (!sharedRegistry.getGauges().keySet().contains(BackupRequestLBHttpSolrClient.cachedGaugeName(performanceClass, BackupRequestLBHttpSolrClient.BackupPercentile.P50))) {
       submitRequest(lbSolrClient, serverList, requestP50);
     }
-    while (!sharedRegistry.getGauges().keySet().contains(BackupRequestLBHttpSolrClient.cachedGaugeName("testPerformanceClass", BackupRequestLBHttpSolrClient.BackupPercentile.P999))) {
+    while (!sharedRegistry.getGauges().keySet().contains(BackupRequestLBHttpSolrClient.cachedGaugeName(performanceClass, BackupRequestLBHttpSolrClient.BackupPercentile.P999))) {
       submitRequest(lbSolrClient, serverList, requestP999);
     }
 
     // establish some performance history - uniform distribution between 1 and 100 ms,
     // (although possibly skewed somewhat by the initialization queries above)
     // which puts the "slow" instance at the 90th percentile.
-    Timer timer = sharedRegistry.timer(BackupRequestLBHttpSolrClient.prefixedMetric("testPerformanceClass"));
+    Timer timer = sharedRegistry.timer(BackupRequestLBHttpSolrClient.timerName(performanceClass));
     Random randomGenerator = new Random();
     for(int i = 0; i<500; i++) timer.update(randomGenerator.nextInt(100) + 1, TimeUnit.MILLISECONDS);
 
@@ -374,10 +375,10 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
             - requestCountBeforeRequest, 1);
   }
 
-  public QueryRequest percentileRequest(String percentile) {
+  public QueryRequest percentileRequest(String percentile, String performanceClass) {
     SolrQuery solrQuery = new SolrQuery("*:*");
     solrQuery.set("backupRequestPercentile",percentile);
-    solrQuery.set("performanceClass","testPerformanceClass");
+    solrQuery.set("performanceClass",performanceClass);
     QueryResponse resp = null;
     QueryRequest request = new QueryRequest(solrQuery);
     return request;

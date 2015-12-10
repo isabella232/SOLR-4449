@@ -11,7 +11,7 @@ Using
 Drop the jar from this project into "server/solr-webapp/webapp/WEB-INF/lib". Due to protected-access modifiers, 
 this jar must be loaded by the same classloader as LBHttpSolrClient. 
 Also insure [metrics-core](http://search.maven.org/#artifactdetails%7Cio.dropwizard.metrics%7Cmetrics-core%7C3.1.2%7Cbundle)
-is available.
+is available. The tests pass using the 3.0.1 version that comes with Solr, but that's a pretty old version at this point.
 
 Configure your solrconfig.xml with a requestHandler that uses a custom shardHandlerFactory, like:
 
@@ -112,7 +112,7 @@ Building
    
 This might require Maven 3.x. 
 
-Then put the resulting jar someplace Solr can get it.   
+Then put the resulting jar someplace Solr can get it.  See "Using". 
     
 Solr versions
 =============
