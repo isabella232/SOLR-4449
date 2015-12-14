@@ -110,7 +110,7 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
 
   @Override
   public void tearDown() throws Exception {
-    ExecutorUtil.shutdownNowAndAwaitTermination(commExecutor);
+    ExecutorUtil.shutdownWithInterruptAndAwaitTermination(commExecutor);
     if (lbSolrServer != null) lbSolrServer.close();
     for (SolrInstance aSolr : solr.values()) {
       aSolr.tearDown();
@@ -507,7 +507,7 @@ public class TestBackupLBHttpSolrClient extends LuceneTestCase {
       List<String> serverList, QueryRequest request)
       throws SolrServerException, IOException {
     return new QueryResponse(lbSolrServer.request(
-        new LBHttpSolrServer.Req(request, serverList)).getResponse(),
+        new LBHttpSolrClient.Req(request, serverList)).getResponse(),
         lbSolrServer);
   }
 
