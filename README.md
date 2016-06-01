@@ -11,11 +11,12 @@ Using
 Drop the jar from this project into "server/solr-webapp/webapp/WEB-INF/lib". Due to protected-access modifiers, 
 this jar must be loaded by the same classloader as LBHttpSolrClient. 
 Also insure [metrics-core](http://search.maven.org/#artifactdetails%7Cio.dropwizard.metrics%7Cmetrics-core%7C3.1.2%7Cbundle)
-is available. The tests pass using the 3.0.1 version that comes with Solr, but that's a pretty old version at this point.
+is available. 
+The tests pass using the 3.0.1 version of metrics-core that comes with Solr, but that's a pretty old version at this point. I'm using 3.1.2
 
 Configure your solrconfig.xml with a requestHandler that uses a custom shardHandlerFactory, like:
 
-      <requestHandler default="true" name="/backup-enabled" class="solr.SearchHandler">
+      <requestHandler name="/backup-enabled" class="solr.SearchHandler">
         <shardHandlerFactory class="HttpBackupRequestShardHandlerFactory"/>
       </requestHandler>
 
@@ -25,7 +26,7 @@ Fixed-delay backup requests
 
 Backup request configuration can happen in the shardHandlerFactory definition, like:
 
-      <requestHandler default="true" name="/backup-enabled" class="solr.SearchHandler">
+      <requestHandler name="/backup-enabled" class="solr.SearchHandler">
         <shardHandlerFactory class="HttpBackupRequestShardHandlerFactory">
           <int name="backupRequestDelay">1500</int>
           <int name="maximumConcurrentRequests">2</int>
